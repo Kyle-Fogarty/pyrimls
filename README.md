@@ -1,7 +1,7 @@
 # Robust Implicit Moving Least Squares in PyTorch
 
 ```sh
-pip install pyrimls
+pip install pyRIMLS
 ```
 
 ### Quick Start: 
