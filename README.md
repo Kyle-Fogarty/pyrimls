@@ -8,7 +8,7 @@ pip install pyrimls
 
 ```python
 import torch 
-import src.pyrimls as pyr
+import pyrimls as pyr
 from diso import DiffMC
 import tqdm
 
