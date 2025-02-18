@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyRIMLS"
+version = "0.0.0"
+authors = [
+    { name="Kyle Fogarty", email="ktf25@cam.ac.uk" },
+]
+description = "A PyTorch implementation of the RIMLS reconstruction algorithm."
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
