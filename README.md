@@ -4,7 +4,8 @@
 ```python
 import torch 
 import src.pyrimls as pyr
-import diso
+from diso import DiffMC
+import tqdm
 
 reconstructor = pyr.RobustImplicitMLS()
 
@@ -33,7 +34,7 @@ batch_size = 10000
 values = []
 for i in tqdm(range(0, len(grid_points), batch_size)):
     batch = grid_points[i:i+batch_size]
-    potential = reconstructor.potential(batch, plc, normals)
+    potential = reconstructor.potential(batch, points, normals)
     values.append(potential)
 
 sdf = torch.cat(values)
