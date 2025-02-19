@@ -1,5 +1,6 @@
 # Robust Implicit Moving Least Squares in PyTorch
 
+The package has been released on pypi and can be installed with the following:
 ```sh
 pip install pyRIMLS
 ```
