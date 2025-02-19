@@ -420,3 +420,227 @@ class RIMLS_Functional:
                 break
                 
         return projected, output_normals
+    
+
+
+
+class RIMLS_Functional_batched:
+    def __init__(self):
+        """
+        Initialize RIMLS with default parameters
+        """
+        # Parameters
+        self.sigma_n = 0.8
+        self.sigma_r = 0.0
+        self.refitting_threshold = 1e-3
+        self.min_refitting_iters = 1
+        self.max_refitting_iters = 3
+        self.projection_accuracy = 0.0001
+        self.max_projection_iters = 15
+
+    def _compute_average_spacing(self, vertices):
+        """
+        Compute average point spacing for projection epsilon
+        
+        Args:
+            vertices: (B, N, 3) tensor of vertex positions
+            
+        Returns:
+            float: average spacing between points per batch
+        """
+        with torch.no_grad():
+            diffs = vertices.unsqueeze(2) - vertices.unsqueeze(1)  # (B, N, N, 3)
+            distances = torch.norm(diffs, dim=3)  # (B, N, N)
+            distances.diagonal(dim1=1, dim2=2).fill_(float('inf'))
+            return distances.min(dim=2)[0].mean(dim=1)  # (B,)
+
+    def compute_weights_and_derivatives(self, query_points, vertices, neighborhood_indices, h):
+        """
+        Compute weights and their derivatives for the given query points
+        
+        Args:
+            query_points: (B, Q, 3) tensor of query positions
+            vertices: (B, N, 3) tensor of vertex positions
+            neighborhood_indices: (B, Q, K) tensor of indices for K nearest neighbors
+            h: (B, Q) tensor of bandwidth parameters
+            
+        Returns:
+            weights: (B, Q, K) tensor of weights
+            weight_gradients: (B, Q, K, 3) tensor of weight gradients
+            weight_derivatives: (B, Q, K) tensor of weight derivatives
+        """
+        B, Q, K = neighborhood_indices.shape
+        
+        # Get positions of neighbors
+        batch_indices = torch.arange(B, device=vertices.device)[:, None, None]
+        batch_indices = batch_indices.expand(-1, Q, K)
+        neighbors = vertices[batch_indices, neighborhood_indices]  # (B, Q, K, 3)
+        
+        # Compute differences and distances
+        diffs = query_points.unsqueeze(2) - neighbors  # (B, Q, K, 3)
+        distances = torch.norm(diffs, dim=3)  # (B, Q, K)
+        
+        # Reshape h to match the dimensions for broadcasting
+        h = h.unsqueeze(2).expand(-1, -1, K)  # (B, Q, K)
+        weights = torch.exp(-distances**2 / (h**2))  # (B, Q, K)
+        
+        # Compute derivatives
+        weight_gradients = -2 * weights.unsqueeze(-1) * diffs / (h**2).unsqueeze(-1)  # (B, Q, K, 3)
+        weight_derivatives = -2 * weights / (h**2)  # (B, Q, K)
+        
+        return weights, weight_gradients, weight_derivatives
+
+    def compute_potential_and_gradient(self, x, vertices, normals, neighborhood_indices, h):
+        """
+        Compute the potential and gradient at query points
+        
+        Args:
+            x: (B, Q, 3) tensor of query positions
+            vertices: (B, N, 3) tensor of vertex positions
+            normals: (B, N, 3) tensor of vertex normals
+            neighborhood_indices: (B, Q, K) tensor of indices for K nearest neighbors
+            h: (B, Q) tensor of bandwidth parameters
+            
+        Returns:
+            potential: (B, Q) tensor of potential values
+            gradient: (B, Q, 3) tensor of gradients
+        """
+        device = x.device
+        B, Q, K = neighborhood_indices.shape
+        
+        # Initialize cached values
+        cached_weights = torch.zeros(B, Q, K, device=device)
+        cached_refitting_weights = torch.ones(B, Q, K, device=device)
+        
+        # Get neighbor positions and normals
+        batch_indices = torch.arange(B, device=device)[:, None, None]
+        batch_indices = batch_indices.expand(-1, Q, K)
+        neighbors = vertices[batch_indices, neighborhood_indices]  # (B, Q, K, 3)
+        neighbor_normals = normals[batch_indices, neighborhood_indices]  # (B, Q, K, 3)
+        
+        # Compute weights and derivatives
+        weights, weight_gradients, _ = self.compute_weights_and_derivatives(x, vertices, neighborhood_indices, h)
+        cached_weights = weights
+        
+        # RIMLS iteration
+        grad = torch.zeros_like(x)
+        for iter_count in range(self.max_refitting_iters):
+            prev_grad = grad.clone()
+            
+            if iter_count > 0:
+                # Compute refitting weights
+                normal_diff = neighbor_normals - prev_grad.unsqueeze(2)
+                refitting_weights = torch.exp(-torch.sum(normal_diff**2, dim=3) / self.sigma_n**2)
+                cached_refitting_weights = refitting_weights
+            
+            # Compute total weights
+            total_weights = cached_weights * cached_refitting_weights  # (B, Q, K)
+            
+            # Compute differences and dot products
+            diffs = x.unsqueeze(2) - neighbors  # (B, Q, K, 3)
+            f = torch.sum(diffs * neighbor_normals, dim=3)  # (B, Q, K)
+            
+            # Compute weighted sums
+            sum_w = total_weights.sum(dim=2)  # (B, Q)
+            sum_wf = (total_weights * f).sum(dim=2)  # (B, Q)
+            
+            # Compute potential and gradient
+            potential = sum_wf / sum_w  # (B, Q)
+            
+            weighted_gradients = weight_gradients * cached_refitting_weights.unsqueeze(-1)  # (B, Q, K, 3)
+            sum_grad_w = weighted_gradients.sum(dim=2)  # (B, Q, 3)
+            sum_grad_wf = (weighted_gradients * f.unsqueeze(-1)).sum(dim=2)  # (B, Q, 3)
+            sum_wn = (total_weights.unsqueeze(-1) * neighbor_normals).sum(dim=2)  # (B, Q, 3)
+            
+            grad = (-sum_grad_w * potential.unsqueeze(-1) + sum_grad_wf + sum_wn) / sum_w.unsqueeze(-1)
+            
+            # Check convergence
+            if iter_count >= self.min_refitting_iters:
+                grad_diff = torch.norm(grad - prev_grad, dim=2)
+                if torch.all(grad_diff <= self.refitting_threshold):
+                    break
+                    
+        return potential, grad
+
+    def potential(self, points, vertices, normals):
+        """
+        Compute the potential value at query points
+        
+        Args:
+            points: (B, N, 3) tensor of query points
+            vertices: (B, M, 3) tensor of vertex positions
+            normals: (B, M, 3) tensor of vertex normals
+            
+        Returns:
+            potential: (B, N) tensor of potential values
+        """
+        device = points.device
+        B, N = points.shape[:2]
+        
+        # Find K nearest neighbors for each point
+        diffs = points.unsqueeze(2) - vertices.unsqueeze(1)  # (B, N, M, 3)
+        distances = torch.norm(diffs, dim=3)  # (B, N, M)
+        k = min(20, vertices.shape[1])
+        _, neighborhood_indices = torch.topk(distances, k, dim=2, largest=False)  # (B, N, K)
+        
+        # Compute local feature size (average distance to neighbors)
+        batch_indices = torch.arange(B, device=device)[:, None, None]
+        batch_indices = batch_indices.expand(-1, N, k)
+        neighbor_distances = distances.gather(2, neighborhood_indices)  # (B, N, K)
+        h = neighbor_distances.mean(dim=2)  # (B, N)
+    
+        # Compute potential
+        potential, _ = self.compute_potential_and_gradient(points, vertices, normals, neighborhood_indices, h)
+        return potential
+
+    def project(self, points, vertices, normals):
+        """
+        Project points onto the surface
+        
+        Args:
+            points: (B, N, 3) tensor of points to project
+            vertices: (B, M, 3) tensor of vertex positions
+            normals: (B, M, 3) tensor of vertex normals
+            
+        Returns:
+            projected_points: (B, N, 3) tensor of projected points
+            normals: (B, N, 3) tensor of surface normals at projected points
+        """
+        device = points.device
+        B, N = points.shape[:2]
+        projected = points.clone()
+        output_normals = torch.zeros_like(points)
+        
+        # Find K nearest neighbors for each point
+        with torch.no_grad():
+            diffs = points.unsqueeze(2) - vertices.unsqueeze(1)  # (B, N, M, 3)
+            distances = torch.norm(diffs, dim=3)  # (B, N, M)
+            k = min(20, vertices.shape[1])
+            _, neighborhood_indices = torch.topk(distances, k, dim=2, largest=False)  # (B, N, K)
+        
+        # Compute local feature size (average distance to neighbors)
+        neighbor_distances = distances.gather(2, neighborhood_indices)  # (B, N, K)
+        h = neighbor_distances.mean(dim=2)  # (B, N)
+        
+        # Compute average spacing for projection epsilon
+        average_spacing = self._compute_average_spacing(vertices)  # (B,)
+        epsilon = average_spacing.unsqueeze(1) * self.projection_accuracy  # (B, 1)
+        
+        # Projection iterations
+        for _ in range(self.max_projection_iters):
+            potential, gradient = self.compute_potential_and_gradient(
+                projected, vertices, normals, neighborhood_indices, h)
+            
+            # Normalize gradient to get normal
+            normal = F.normalize(gradient, dim=2)
+            output_normals = normal
+            
+            # Update position
+            delta = potential.unsqueeze(-1) * normal
+            projected = projected - delta
+            
+            # Check convergence
+            if torch.all(torch.abs(potential) <= epsilon):
+                break
+                
+        return projected, output_normals

@@ -1,2 +1,3 @@
 from .reconstructor import RIMLS_Functional as RobustImplicitMLS
 from .reconstructor import RIMLS as RobustImplicitMLS_
+from .reconstructor import RIMLS_Functional_batched as RobustImplicitMLS_batched
